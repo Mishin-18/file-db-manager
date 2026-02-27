@@ -1,9 +1,9 @@
 """
 File Database Manager - Professional File Indexing Tool
 Modern UI with ttkbootstrap themes and live theme/language switching
-Author: Your Name
-Version: 2.0.3-merged-hotfix
+Author: Mikhail Mishin
 """
+__version__ = "1.0.0"
 
 import os
 import re
