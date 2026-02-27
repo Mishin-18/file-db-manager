@@ -1,5 +1,9 @@
 # File DB Manager
 
+[![GitHub release](https://img.shields.io/badge/release-v1.0.0-blue.svg)](https://github.com/Mishin-18/file-db-manager/releases/tag/v1.0.0)
+
+🇷🇺 [Русская версия](README.ru.md)
+
 A professional file indexing and management tool with SQLite backend.  
 Scan folders, track files, verify lists against database, and resolve ambiguities manually.
 
