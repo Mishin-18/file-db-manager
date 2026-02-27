@@ -1,5 +1,9 @@
 # File DB Manager
 
+[![GitHub release](https://img.shields.io/badge/релиз-v1.0.0-blue.svg)](https://github.com/Mishin-18/file-db-manager/releases/tag/v1.0.0)
+
+🇬🇧 [English version](README.md)
+
 Профессиональный инструмент для индексации и управления файлами с SQLite.  
 Сканируйте папки, отслеживайте файлы, проверяйте списки путей и разрешайте неоднозначности вручную.
 
