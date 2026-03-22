@@ -1,0 +1,27 @@
+Unified close-flow refactor
+
+What changed
+- Added one shared class: ActiveScanCloseController in gui/main_window.py.
+- All active-scan close/cancel paths now go through this single controller.
+
+Paths switched to the controller
+- Main window close during active scan
+- Progress window close during active scan
+- Stop button confirmation/cancel
+
+What the controller does
+- Optionally hides the progress dialog before showing the close dialog
+- Shows one common custom close-action dialog
+- Restores the progress dialog on Cancel
+- Handles the stop-button confirmation through the same controller entry point
+
+Methods now using the unified path
+- App.stop_op()
+- App._show_scan_close_action()
+- App._handle_active_scan_close()
+- App.exit_app()
+
+Why this was changed
+- Previous fixes handled close/cancel behavior in separate branches.
+- That caused inconsistent behavior and regressions.
+- The new version routes all close/cancel decisions through one shared object.
