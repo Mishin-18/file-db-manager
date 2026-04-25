@@ -1,3 +1,4 @@
+from core.proc import popen_quiet, run_quiet
 import os
 import sys
 import time
@@ -97,7 +98,7 @@ def show_help_update_db(parent):
 
     btns = ttk.Frame(frame)
     btns.pack(fill="x", pady=(16, 0))
-    close_text = i18n.t('close') if i18n.t('close') != 'close' else ('Закрыть' if getattr(i18n, 'current_lang', 'ru') == 'ru' else 'Close')
+    close_text = i18n.t('close')
     ttk.Button(btns, text=close_text, command=dlg.destroy, bootstyle="primary").pack(side="right")
 
     dlg.bind("<Escape>", lambda e: dlg.destroy())
@@ -157,8 +158,8 @@ def show_file_not_found_dialog(parent, folder_path: str):
     btns = ttk.Frame(frame)
     btns.pack(fill="x", pady=(16, 0))
 
-    help_text = i18n.t('help') if i18n.t('help') != 'help' else ('Справка' if getattr(i18n, 'current_lang', 'ru') == 'ru' else 'Help')
-    close_text = i18n.t('close') if i18n.t('close') != 'close' else ('Закрыть' if getattr(i18n, 'current_lang', 'ru') == 'ru' else 'Close')
+    help_text = i18n.t('help')
+    close_text = i18n.t('close')
 
     ttk.Button(btns, text=help_text, bootstyle="secondary", command=lambda: show_help_update_db(dlg)).pack(side="left")
     ttk.Button(btns, text=close_text, bootstyle="primary", command=dlg.destroy).pack(side="right")
@@ -193,26 +194,24 @@ def _run_powershell_hidden(ps_script: str):
         "-ExecutionPolicy", "Bypass",
         "-Command", ps_script
     ]
-    subprocess.Popen(
-        cmd,
-        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)
-    )
+    popen_quiet(cmd)
 
 
-def _show_in_folder_win10(path_norm: str):
-    subprocess.Popen(
-        ["explorer.exe", "/select,", path_norm],
-        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)
-    )
+def _open_folder_win(folder_path: str):
+    popen_quiet(["explorer.exe", folder_path])
+
+
+def _show_item_in_parent_win10(parent_folder: str, item_name: str):
+    popen_quiet(["explorer.exe", "/select,", os.path.join(parent_folder, item_name)])
 
     time.sleep(0.5)
 
-    p_for_ps = path_norm.replace('"', '""')
+    folder_ps = parent_folder.replace('"', '""')
+    item_ps = item_name.replace('"', '""')
     ps = f"""
 $ErrorActionPreference = 'SilentlyContinue'
-$full = "{p_for_ps}"
-$folder = Split-Path -Parent $full
-$fileName = Split-Path -Leaf $full
+$folder = "{folder_ps}"
+$itemName = "{item_ps}"
 
 if ([string]::IsNullOrWhiteSpace($folder)) {{ exit 0 }}
 
@@ -237,7 +236,7 @@ if ($targetWindow -ne $null) {{
     try {{
         $targetWindow.Visible = $true
         $folderObj = $targetWindow.Document.Folder
-        $item = $folderObj.ParseName($fileName)
+        $item = $folderObj.ParseName($itemName)
 
         if ($item -ne $null) {{
             $targetWindow.Document.SelectItem($null, 0)
@@ -253,13 +252,13 @@ if ($targetWindow -ne $null) {{
     _run_powershell_hidden(ps)
 
 
-def _show_in_folder_win11(path_norm: str):
-    p_for_ps = path_norm.replace('"', '""')
+def _show_item_in_parent_win11(parent_folder: str, item_name: str):
+    folder_ps = parent_folder.replace('"', '""')
+    item_ps = item_name.replace('"', '""')
     ps = f"""
 $ErrorActionPreference = 'SilentlyContinue'
-$path = "{p_for_ps}"
-$folder = Split-Path $path -Parent
-$file = Split-Path $path -Leaf
+$folder = "{folder_ps}"
+$itemName = "{item_ps}"
 
 if ([string]::IsNullOrWhiteSpace($folder)) {{ exit 0 }}
 
@@ -275,7 +274,7 @@ foreach ($w in $windows) {{
       $w.Visible = $true
 
       $folderObj = $w.Document.Folder
-      $item = $folderObj.ParseName($file)
+      $item = $folderObj.ParseName($itemName)
 
       if ($item -ne $null) {{
         $w.Document.SelectItem($item, 1 + 4 + 8 + 16)
@@ -290,10 +289,28 @@ foreach ($w in $windows) {{
     _run_powershell_hidden(ps)
 
 
+def _show_in_folder_win10(path_norm: str):
+    parent_folder = os.path.dirname(path_norm)
+    item_name = os.path.basename(path_norm)
+    if not parent_folder or parent_folder == path_norm or not item_name:
+        _open_folder_win(path_norm)
+        return
+    _show_item_in_parent_win10(parent_folder, item_name)
+
+
+def _show_in_folder_win11(path_norm: str):
+    parent_folder = os.path.dirname(path_norm)
+    item_name = os.path.basename(path_norm)
+    if not parent_folder or parent_folder == path_norm or not item_name:
+        _open_folder_win(path_norm)
+        return
+    _show_item_in_parent_win11(parent_folder, item_name)
+
+
 def reveal_in_folder(path: str, parent=None):
     path = (path or "").strip()
     if not path:
-        Messagebox.show_warning(i18n.t('warning'), i18n.t('empty_path_msg'), parent=parent)
+        Messagebox.show_warning(i18n.t('empty_path_msg'), i18n.t('warning'), parent=parent)
         return
 
     _parent = parent
@@ -306,10 +323,10 @@ def reveal_in_folder(path: str, parent=None):
     try:
         if not IS_WIN:
             if sys.platform == "darwin":
-                subprocess.run(["open", "-R", path], check=False)
+                run_quiet(["open", "-R", path], check=False)
                 return
             folder = os.path.dirname(path) if os.path.isfile(path) else path
-            subprocess.run(["xdg-open", folder], check=False)
+            run_quiet(["xdg-open", folder], check=False)
             return
 
         path_norm = os.path.normpath(path.strip('"').strip())
@@ -324,7 +341,7 @@ def reveal_in_folder(path: str, parent=None):
                 if _parent is not None:
                     show_file_not_found_dialog(_parent, str(folder))
             else:
-                Messagebox.show_error(i18n.t('error'), f"{i18n.t('not_found_msg')}{path_norm}", parent=_parent)
+                Messagebox.show_error(f"{i18n.t('not_found_msg')}{path_norm}", i18n.t('error'), parent=_parent)
             return
 
         if is_windows_11():
@@ -333,4 +350,4 @@ def reveal_in_folder(path: str, parent=None):
             _show_in_folder_win10(path_norm)
 
     except Exception:
-        Messagebox.show_error(i18n.t('error'), f"{i18n.t('show_in_folder_failed_generic')}\n\n{path}", parent=_parent)
+        Messagebox.show_error(f"{i18n.t('show_in_folder_failed_generic')}\n\n{path}", i18n.t('error'), parent=_parent)

@@ -9,7 +9,7 @@ from typing import Callable, Any
 
 from core.env import IS_WIN
 from core.i18n import i18n
-from core.db import init_db, MARK_ALL_MISSING_SQL, UPSERT_SQL
+from core.db import init_db, MARK_ALL_MISSING_SQL, MARK_ALL_FOLDERS_MISSING_SQL, UPSERT_SQL, UPSERT_FOLDER_SQL
 from core.shell import is_hidden_or_system
 
 EXCLUDE_DIR_NAMES = {
@@ -229,9 +229,12 @@ def scan_folders_to_db(
 
     if incremental:
         cur.execute(MARK_ALL_MISSING_SQL)
+        cur.execute(MARK_ALL_FOLDERS_MISSING_SQL)
         con.commit()
     else:
+        cur.execute("DELETE FROM file_content;")
         cur.execute("DELETE FROM files;")
+        cur.execute("DELETE FROM folders;")
         con.commit()
         try:
             con.execute("VACUUM")
@@ -255,6 +258,7 @@ def scan_folders_to_db(
     }
     per_folder_counts = defaultdict(int)
     batch = []
+    folder_batch = []
     batch_size = 800
     scan_mode = i18n.t('scan_mode_recursive') if recursive else i18n.t('scan_mode_norec')
     last_ui_report = 0.0
@@ -291,12 +295,14 @@ def scan_folders_to_db(
         last_ui_processed = processed
 
     def flush():
-        nonlocal batch
-        if not batch:
-            return
-        cur.executemany(UPSERT_SQL, batch)
+        nonlocal batch, folder_batch
+        if folder_batch:
+            cur.executemany(UPSERT_FOLDER_SQL, folder_batch)
+            folder_batch = []
+        if batch:
+            cur.executemany(UPSERT_SQL, batch)
+            batch = []
         con.commit()
-        batch = []
 
     for root_index, root_folder in enumerate(roots):
         root_tag = _make_root_tag(root_folder, root_index)
@@ -304,6 +310,16 @@ def scan_folders_to_db(
             if stop_flag and stop_flag.get("stop"):
                 stats["stopped"] = True
                 break
+            try:
+                dir_stat = os.stat(dirpath)
+                rel_dir = os.path.relpath(dirpath, root_folder)
+                rel_dir = "." if rel_dir in (".", os.curdir) else rel_dir
+                folder_rel = f"[{root_tag}] {rel_dir}"
+                folder_batch.append((os.path.basename(dirpath) or Path(root_folder).name, folder_rel, dirpath, int(dir_stat.st_mtime)))
+                if len(folder_batch) >= batch_size:
+                    flush()
+            except Exception:
+                pass
             for fn in filenames:
                 if stop_flag and stop_flag.get("stop"):
                     stats["stopped"] = True
@@ -371,6 +387,7 @@ def scan_folders_to_db(
 
     flush()
     stats["missing"] = cur.execute("SELECT COUNT(*) FROM files WHERE is_present=0;").fetchone()[0]
+    stats["missing_folders"] = cur.execute("SELECT COUNT(*) FROM folders WHERE is_present=0;").fetchone()[0]
     con.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('updated_at', ?);", (str(int(time.time())),))
     con.commit()
     stats["per_folder"] = dict(per_folder_counts)

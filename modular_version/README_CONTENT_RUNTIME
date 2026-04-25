@@ -1,0 +1,19 @@
+Для OCR рядом с приложением должна лежать папка content_runtime.
+Структура:
+  content_runtime/
+    tesseract/
+      tesseract.exe
+      tessdata/
+        rus.traineddata
+        eng.traineddata
+        osd.traineddata
+    poppler/
+      bin/
+        pdftoppm.exe
+
+В Viewer добавлены:
+- общий поиск по файлам и папкам
+- поиск по содержимому документов
+- фильтры: расширение, размер, дата
+- режим переиндексации: изменённые / все / ошибки
+- сбор выбранных файлов в отдельную папку
