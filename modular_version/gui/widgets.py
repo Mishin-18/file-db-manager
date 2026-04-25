@@ -8,10 +8,10 @@ from core.ui_common import apply_app_icon
 
 
 class CustomDialog(ttk.Toplevel):
-    def __init__(self, parent=None, title="Dialog", transient=True, **kwargs):
+    def __init__(self, parent=None, title=None, transient=True, **kwargs):
         super().__init__(parent, **kwargs)
         self.withdraw()
-        self.title(title)
+        self.title(title or i18n.t("app_title"))
         self.resizable(True, True)
         apply_app_icon(self)
         if transient and parent is not None:
@@ -154,11 +154,7 @@ class CustomMessagebox:
 
     @staticmethod
     def _single_button_text():
-        txt = i18n.t("ok")
-        if txt and txt != "ok":
-            return txt
-        lang = getattr(i18n, "current_lang", "ru")
-        return "Понятно" if lang == "ru" else "Got it"
+        return i18n.t("ok")
 
     @staticmethod
     def _show(message, title, parent=None, kind="info", buttons=("ok",)):
@@ -173,8 +169,8 @@ class CustomMessagebox:
         apply_app_icon(dlg)
         dlg.title(title)
         dlg.resizable(False, False)
-        dlg.minsize(620, 260)
-        dlg.geometry("820x320")
+        dlg.minsize(720, 320)
+        dlg.geometry("920x400")
 
 
         def close_with(value):
@@ -283,8 +279,8 @@ class CustomMessagebox:
         apply_app_icon(dlg)
         dlg.title(title)
         dlg.resizable(False, False)
-        dlg.minsize(660, 280)
-        dlg.geometry("840x340")
+        dlg.minsize(760, 340)
+        dlg.geometry("960x420")
 
 
         def close_with(value):
@@ -379,21 +375,84 @@ class CustomMessagebox:
 
 
 class ToolTip:
-    def __init__(self, widget, text=""):
+    def __init__(self, widget, text="", delay_ms=250):
         self.widget = widget
         self.text = text
         self.tip = None
-        widget.bind("<Enter>", self._enter, add="+")
+        self._job = None
+        self.delay_ms = int(delay_ms)
+        widget.bind("<Enter>", self._schedule_show, add="+")
         widget.bind("<Leave>", self._leave, add="+")
+        widget.bind("<ButtonPress>", self._leave, add="+")
+        widget.bind("<Destroy>", self._leave, add="+")
+        widget.bind("<Configure>", self._reposition, add="+")
 
-    def _enter(self, _event=None):
+    def _schedule_show(self, _event=None):
+        self._cancel_job()
         if self.tip or not self.text:
             return
-        x = self.widget.winfo_rootx() + 16
-        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 8
+        try:
+            self._job = self.widget.after(self.delay_ms, self._show)
+        except Exception:
+            self._show()
+
+    def _cancel_job(self):
+        if self._job is not None:
+            try:
+                self.widget.after_cancel(self._job)
+            except Exception:
+                pass
+            self._job = None
+
+    def _compute_geometry(self, tip_width: int, tip_height: int):
+        try:
+            screen_w = int(self.widget.winfo_screenwidth())
+            screen_h = int(self.widget.winfo_screenheight())
+            ptr_x = int(self.widget.winfo_pointerx())
+            ptr_y = int(self.widget.winfo_pointery())
+            root_x = int(self.widget.winfo_rootx())
+            root_y = int(self.widget.winfo_rooty())
+            w = int(self.widget.winfo_width())
+            h = int(self.widget.winfo_height())
+        except Exception:
+            return 20, 20
+
+        pad = 12
+        cursor_dx = 18
+        cursor_dy = 20
+
+        x = ptr_x + cursor_dx
+        y = ptr_y + cursor_dy
+
+        if x + tip_width + pad > screen_w:
+            x = ptr_x - tip_width - cursor_dx
+        if y + tip_height + pad > screen_h:
+            y = ptr_y - tip_height - cursor_dy
+
+        # Fallback to widget-based placement when pointer-based placement still fails.
+        if x < pad or x + tip_width + pad > screen_w:
+            x = root_x + w - tip_width - 16
+        if y < pad or y + tip_height + pad > screen_h:
+            y = root_y - tip_height - 8
+            if y < pad:
+                y = root_y + h + 8
+
+        max_x = max(pad, screen_w - tip_width - pad)
+        max_y = max(pad, screen_h - tip_height - pad)
+        x = max(pad, min(x, max_x))
+        y = max(pad, min(y, max_y))
+        return x, y
+
+    def _show(self):
+        self._cancel_job()
+        if self.tip or not self.text:
+            return
         self.tip = tw = tk.Toplevel(self.widget)
         tw.wm_overrideredirect(True)
-        tw.wm_geometry(f"+{x}+{y}")
+        try:
+            tw.attributes("-topmost", True)
+        except Exception:
+            pass
         lbl = ttk.Label(
             tw,
             text=self.text,
@@ -403,11 +462,92 @@ class ToolTip:
             wraplength=420,
         )
         lbl.pack()
+        try:
+            tw.update_idletasks()
+            tip_w = int(tw.winfo_reqwidth())
+            tip_h = int(tw.winfo_reqheight())
+            x, y = self._compute_geometry(tip_w, tip_h)
+            tw.wm_geometry(f"+{x}+{y}")
+        except Exception:
+            pass
+
+    def _reposition(self, _event=None):
+        if not self.tip:
+            return
+        try:
+            self.tip.update_idletasks()
+            tip_w = int(self.tip.winfo_reqwidth())
+            tip_h = int(self.tip.winfo_reqheight())
+            x, y = self._compute_geometry(tip_w, tip_h)
+            self.tip.wm_geometry(f"+{x}+{y}")
+        except Exception:
+            pass
 
     def _leave(self, _event=None):
+        self._cancel_job()
         if self.tip:
-            self.tip.destroy()
+            try:
+                self.tip.destroy()
+            except Exception:
+                pass
             self.tip = None
+
+
+class HelpAffordance:
+    SHORT_ICON = "?"
+    LONG_ICON = "ⓘ"
+
+    def __init__(self, button, text_getter, title_getter=None, parent_getter=None, short_tooltip_text_getter=None, width=3):
+        self.button = button
+        self.text_getter = text_getter
+        self.title_getter = title_getter
+        self.parent_getter = parent_getter or (lambda: None)
+        self.short_tooltip_text_getter = short_tooltip_text_getter or text_getter
+        self.width = int(width)
+        self.tooltip = ToolTip(button, "")
+        self.apply()
+
+    @staticmethod
+    def _line_count(text: str) -> int:
+        normalized = (text or '').replace('\r\n', '\n').replace('\r', '\n').strip('\n')
+        if not normalized.strip():
+            return 0
+        return len(normalized.split('\n'))
+
+    def _is_short(self, text: str) -> bool:
+        return self._line_count(text) <= 3
+
+    def apply(self):
+        text = self.text_getter() or ''
+        title = self.title_getter() if callable(self.title_getter) else None
+        is_short = self._is_short(text)
+
+        if is_short:
+            tooltip_text = self.short_tooltip_text_getter() or text
+            self.tooltip.text = tooltip_text
+            try:
+                self.button.configure(text=self.SHORT_ICON, width=self.width, command=lambda: None)
+            except Exception:
+                pass
+        else:
+            self.tooltip.text = i18n.t('tt_help_btn')
+            def _show_long_help():
+                CustomMessagebox.show_info(text, title or i18n.t('help_title'), parent=self.parent_getter())
+            try:
+                self.button.configure(text=self.LONG_ICON, width=self.width, command=_show_long_help)
+            except Exception:
+                pass
+
+
+def attach_help(button, text_getter, title_getter=None, parent_getter=None, short_tooltip_text_getter=None, width=3):
+    return HelpAffordance(
+        button=button,
+        text_getter=text_getter,
+        title_getter=title_getter,
+        parent_getter=parent_getter,
+        short_tooltip_text_getter=short_tooltip_text_getter,
+        width=width,
+    )
 
 
 class Spinner(ttk.Frame):

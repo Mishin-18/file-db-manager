@@ -6,14 +6,14 @@ import tkinter as tk
 import ttkbootstrap as ttk
 from ttkbootstrap.constants import *
 from ttkbootstrap.widgets import ToastNotification
-from tkinter import filedialog
 
 from core.i18n import i18n
 from core.env import HAS_OPENPYXL, IS_WIN
 from core.ui_common import apply_app_icon
 from core.tray import TrayIcon
-from core.db import init_db
+from core.db import init_db, get_missing_required_tables, validate_db_path
 from core.scanner import scan_folders_to_db
+from core.content.indexer import index_document_contents
 from core.shell import get_paths_from_clipboard_win
 from core.resolver import (
     parse_paths_from_text,
@@ -22,7 +22,7 @@ from core.resolver import (
     upsert_set,
     sync_set_items,
 )
-from gui.widgets import CustomMessagebox as Messagebox, ToolTip, Spinner
+from gui.widgets import CustomMessagebox as Messagebox, ToolTip, Spinner, attach_help
 
 
 class ActiveScanCloseController:
@@ -80,11 +80,18 @@ class ActiveScanCloseController:
 
     def _confirm_stop_only(self):
         self.app._restore_main_before_dialog()
-        ok = Messagebox.yesno(i18n.t("confirm_stop_msg"), i18n.t("confirm_stop_title"), parent=self.app)
-        if not ok:
-            self._show_progress_again()
+        action = self._show_close_action_dialog(
+            title=i18n.t('scan_close_running_title'),
+            message=i18n.t('scan_close_running_msg'),
+            hide_progress=False,
+        )
+        if action == "background":
+            self.app._background_scan()
             return False
-        return True
+        if action == "stop":
+            return True
+        self._show_progress_again()
+        return False
 
     def request(self, source: str, *, title: str = None, message: str = None, hide_progress: bool = False):
         """Return one of: cancel, background, stop."""
@@ -100,7 +107,7 @@ class ActiveScanCloseController:
             self._show_progress_again()
         return action
 from gui.viewer import Viewer
-from gui.dialogs import simple_input
+from gui.dialogs import simple_input, askopenfilename_custom, asksaveasfilename_custom, askdirectory_custom, choose_multiple_folders
 
 class App(ttk.Window):
     """Main application window with theme and language switching"""
@@ -214,6 +221,30 @@ class App(ttk.Window):
                                    font=("Segoe UI", 9))
         self.info_label.pack(padx=10, pady=10, anchor="w")
 
+        # Quick start mini-block
+        self.quick_start_visible = True
+        self.quick_start_frame = ttk.LabelFrame(main, text=i18n.t('quick_start_title'))
+        self.quick_start_frame.pack(fill="x", pady=(0, 15))
+
+        self.quick_start_body = ttk.Label(
+            self.quick_start_frame,
+            text=i18n.t('quick_start_text'),
+            justify="left",
+            anchor="w",
+            font=("Segoe UI", 9),
+            wraplength=860
+        )
+        self.quick_start_body.pack(fill="x", padx=10, pady=(8, 6), anchor="w")
+
+        self.quick_start_toggle_btn = ttk.Button(
+            self.quick_start_frame,
+            text=i18n.t('btn_hide'),
+            width=10,
+            command=self.toggle_quick_start,
+            bootstyle="secondary-outline"
+        )
+        self.quick_start_toggle_btn.pack(anchor="w", padx=10, pady=(0, 10))
+
         # Options
         self.options_frame = ttk.LabelFrame(main, text=i18n.t('scan_options'))
         self.options_frame.pack(fill="x", pady=(0, 15))
@@ -238,20 +269,32 @@ class App(ttk.Window):
                                                 bootstyle="primary")
         self.incremental_check.pack(side="left")
 
-        self.incremental_help_btn = ttk.Button(opt_row, text="?", width=3,
+        self.incremental_help_btn = ttk.Button(opt_row, text="ⓘ", width=3,
                                               command=self._show_incremental_help,
-                                              bootstyle="secondary")
+                                               bootstyle="secondary")
         self.incremental_help_btn.pack(side="left", padx=(6, 14))
+        self.help_incremental = attach_help(
+            self.incremental_help_btn,
+            text_getter=lambda: i18n.t('help_incremental_text'),
+            title_getter=lambda: i18n.t('help_incremental_title'),
+            parent_getter=lambda: self,
+        )
         self.sha1_check = ttk.Checkbutton(opt_row, text=i18n.t('calc_sha1'),
                                          variable=self.var_sha1,
                                          command=self._on_sha1_toggle,
                                          bootstyle="warning")
         self.sha1_check.pack(side="left")
 
-        self.sha1_help_btn = ttk.Button(opt_row, text="?", width=3,
+        self.sha1_help_btn = ttk.Button(opt_row, text="ⓘ", width=3,
                                         command=self._show_sha1_help,
-                                        bootstyle="secondary")
+                                               bootstyle="secondary")
         self.sha1_help_btn.pack(side="left", padx=(6, 14))
+        self.help_sha1 = attach_help(
+            self.sha1_help_btn,
+            text_getter=lambda: i18n.t('help_sha1_text'),
+            title_getter=lambda: i18n.t('help_sha1_title'),
+            parent_getter=lambda: self,
+        )
         self.recursive_check = ttk.Checkbutton(opt_row, text=i18n.t('include_subfolders'), 
                                               variable=self.var_recursive,
                                               bootstyle="success")
@@ -261,8 +304,6 @@ class App(ttk.Window):
         self.tt_incremental = ToolTip(self.incremental_check, i18n.t('tt_incremental'))
         self.tt_sha1 = ToolTip(self.sha1_check, i18n.t('tt_sha1'))
         self.tt_recursive = ToolTip(self.recursive_check, i18n.t('tt_recursive'))
-        self.tt_incremental_help = ToolTip(self.incremental_help_btn, i18n.t('tt_help_btn'))
-        self.tt_sha1_help = ToolTip(self.sha1_help_btn, i18n.t('tt_help_btn'))
 
 
         # Action buttons
@@ -276,7 +317,7 @@ class App(ttk.Window):
                                    bootstyle="success",
                                    width=40)
         self.btn_build.pack(side="left", fill="x", expand=True)
-        self.btn_build_help = ttk.Button(build_row, text="?", width=3,
+        self.btn_build_help = ttk.Button(build_row, text="ⓘ", width=3,
                                         command=self._show_build_help,
                                         bootstyle="secondary")
         self.btn_build_help.pack(side="left", padx=(6,0))
@@ -290,9 +331,15 @@ class App(ttk.Window):
                                  width=40)
         self.btn_set.pack(side="left", fill="x", expand=True)
         self.btn_set_help = ttk.Button(set_row, text="?", width=3,
-                                      command=self._show_set_help,
                                       bootstyle="secondary")
         self.btn_set_help.pack(side="left", padx=(6,0))
+        self.help_set = attach_help(
+            self.btn_set_help,
+            text_getter=lambda: i18n.t('help_btn_set_text'),
+            title_getter=lambda: i18n.t('help_btn_set_title'),
+            parent_getter=lambda: self,
+            short_tooltip_text_getter=lambda: i18n.t('help_btn_set_text'),
+        )
 
         view_row = ttk.Frame(actions)
         view_row.pack(fill="x", pady=4)
@@ -302,9 +349,29 @@ class App(ttk.Window):
                                   width=40)
         self.btn_view.pack(side="left", fill="x", expand=True)
         self.btn_view_help = ttk.Button(view_row, text="?", width=3,
-                                       command=self._show_view_help,
                                        bootstyle="secondary")
         self.btn_view_help.pack(side="left", padx=(6,0))
+        self.help_view = attach_help(
+            self.btn_view_help,
+            text_getter=lambda: i18n.t('help_btn_view_text'),
+            title_getter=lambda: i18n.t('help_btn_view_title'),
+            parent_getter=lambda: self,
+        )
+
+        content_row = ttk.Frame(actions)
+        content_row.pack(fill="x", pady=4)
+        self.btn_index_content = ttk.Button(
+            content_row,
+            text=i18n.t('btn_index_content'),
+            command=self.index_document_content,
+            bootstyle="warning",
+            width=40
+        )
+        self.btn_index_content.pack(side="left", fill="x", expand=True)
+        self.btn_index_content_help = ttk.Button(content_row, text="ⓘ", width=3,
+                                                command=self._show_index_content_help,
+                                                bootstyle="secondary")
+        self.btn_index_content_help.pack(side="left", padx=(6,0))
 
         exit_row = ttk.Frame(actions)
         exit_row.pack(fill="x", pady=(8, 0))
@@ -314,17 +381,36 @@ class App(ttk.Window):
                                   width=14)
         self.btn_exit.pack(side="right")
 
-        self.tt_btn_build_help = ToolTip(self.btn_build_help, i18n.t('tt_help_btn'))
-        self.tt_btn_set_help = ToolTip(self.btn_set_help, i18n.t('tt_help_btn'))
-        self.tt_btn_view_help = ToolTip(self.btn_view_help, i18n.t('tt_help_btn'))
+        self.help_build = attach_help(
+            self.btn_build_help,
+            text_getter=lambda: i18n.t('help_btn_build_text'),
+            title_getter=lambda: i18n.t('help_btn_build_title'),
+            parent_getter=lambda: self,
+        )
+        self.help_index_content = attach_help(
+            self.btn_index_content_help,
+            text_getter=lambda: i18n.t('help_index_content_text'),
+            title_getter=lambda: i18n.t('help_index_content_title'),
+            parent_getter=lambda: self,
+        )
 
         # Status bar
         status_frame = ttk.Frame(main)
         status_frame.pack(fill="x", pady=(10, 0))
+        self.status_frame = status_frame
 
-        self.status = ttk.Label(status_frame, text=i18n.t('status_ready'), 
-                                font=("Segoe UI", 9))
-        self.status.pack(side="left")
+        status_text_frame = ttk.Frame(status_frame)
+        status_text_frame.pack(side="left", fill="x", expand=True)
+
+        self.status = ttk.Label(
+            status_text_frame,
+            text=i18n.t('status_ready'),
+            font=("Segoe UI", 9),
+            anchor="w",
+            justify="left",
+            wraplength=900,
+        )
+        self.status.pack(side="left", fill="x", expand=True)
 
         self.stop_flag = {"stop": False}
         self.scan_close_controller = ActiveScanCloseController(self)
@@ -335,8 +421,14 @@ class App(ttk.Window):
             command=self.stop_op,
             bootstyle="danger-outline"
         )
-        self.btn_stop.pack(side="right")
+        self.btn_stop.pack(side="right", padx=(10, 0))
         self.btn_stop.config(state="disabled")
+
+        try:
+            self.status_frame.bind("<Configure>", self._on_status_frame_configure)
+            self.btn_stop.bind("<Configure>", self._on_status_frame_configure)
+        except Exception:
+            pass
 
         self.xlsx_warn_label = None
         # XLSX warning
@@ -396,32 +488,125 @@ class App(ttk.Window):
     def _show_incremental_help(self):
         Messagebox.show_info(i18n.t('help_incremental_text'), i18n.t('help_incremental_title'), parent=self)
 
+
+
+
+
+
+
+
+
     def _show_sha1_help(self):
         Messagebox.show_info(i18n.t('help_sha1_text'), i18n.t('help_sha1_title'), parent=self)
+
+
+
+
+
+
+
+
 
     def _show_build_help(self):
         Messagebox.show_info(i18n.t('help_btn_build_text'), i18n.t('help_btn_build_title'), parent=self)
 
     def _show_set_help(self):
-        Messagebox.show_info(i18n.t('help_btn_set_text'), i18n.t('help_btn_set_title'), parent=self)
+        return
+
+
+
+
+
+
+
+
+
 
     def _show_view_help(self):
-        Messagebox.show_info(i18n.t('help_btn_view_text'), i18n.t('help_btn_view_title'), parent=self)
+        return
 
-    def change_language(self, event=None):
-        """Change application language"""
-        new_lang = self.lang_var.get()
-        i18n.set_language(new_lang)
-        
-        # Update main window
+
+
+
+
+    def _show_index_content_help(self):
+        title = i18n.t('help_index_content_title')
+        text = i18n.t('help_index_content_text')
+        Messagebox.show_info(text, title, parent=self)
+
+    def _apply_quick_start_state(self):
+        try:
+            if self.quick_start_visible:
+                if not self.quick_start_body.winfo_manager():
+                    self.quick_start_body.pack(before=self.quick_start_toggle_btn, fill="x", padx=10, pady=(8, 6), anchor="w")
+                self.quick_start_toggle_btn.config(text=i18n.t('btn_hide'))
+            else:
+                if self.quick_start_body.winfo_manager():
+                    self.quick_start_body.pack_forget()
+                self.quick_start_toggle_btn.config(text=i18n.t('btn_show'))
+        except Exception:
+            pass
+
+    def toggle_quick_start(self):
+        self.quick_start_visible = not self.quick_start_visible
+        self._apply_quick_start_state()
+
+    def _iter_ui_targets(self):
+        """Yield all live descendant windows/widgets that can react to language updates."""
+        stack = [self]
+        seen = set()
+        while stack:
+            widget = stack.pop()
+            marker = id(widget)
+            if marker in seen:
+                continue
+            seen.add(marker)
+            yield widget
+            try:
+                children = widget.winfo_children()
+            except Exception:
+                children = []
+            stack.extend(children)
+
+    def _refresh_scan_progress_language(self):
+        """Refresh texts inside the shared scan progress dialog, if it is open."""
+        dlg = getattr(self, 'scan_progress_dialog', None)
+        try:
+            if not dlg or not dlg.winfo_exists():
+                return
+        except Exception:
+            return
+        try:
+            dlg.title(i18n.t('status_scan'))
+        except Exception:
+            pass
+        try:
+            if getattr(self, 'scan_progress_bg_btn', None):
+                self.scan_progress_bg_btn.config(text=i18n.t('btn_background'))
+            if getattr(self, 'scan_progress_stop_btn', None):
+                self.scan_progress_stop_btn.config(text=i18n.t('btn_stop'))
+        except Exception:
+            pass
+        try:
+            if getattr(self, 'scan_progress_title_label', None):
+                current = str(self.scan_progress_title_label.cget('text') or '')
+                if not current.strip() or current == i18n.t('status_counting_title'):
+                    self.scan_progress_title_label.config(text=i18n.t('status_counting_title'))
+        except Exception:
+            pass
+
+    def _apply_language_to_self(self):
+        """Update texts in the main window itself from the current language."""
         self.title(i18n.t('app_title'))
         self.title_label.config(text=i18n.t('app_title'))
         self.lang_label.config(text=i18n.t('language'))
         self.theme_label.config(text=i18n.t('theme'))
         self.subtitle_label.config(text=i18n.t('app_subtitle'))
         self.info_label.config(text=i18n.t('info_text'))
-        
-        # Update options frame
+        self.quick_start_frame.config(text=i18n.t('quick_start_title'))
+        self.quick_start_body.config(text=i18n.t('quick_start_text'))
+        self._apply_quick_start_state()
+
         self.options_frame.config(text=i18n.t('scan_options'))
         self.incremental_check.config(text=i18n.t('incremental'))
         self.sha1_check.config(text=i18n.t('calc_sha1'))
@@ -430,26 +615,20 @@ class App(ttk.Window):
             self.tt_incremental.text = i18n.t('tt_incremental')
             self.tt_sha1.text = i18n.t('tt_sha1')
             self.tt_recursive.text = i18n.t('tt_recursive')
-            self.tt_incremental_help.text = i18n.t('tt_help_btn')
-            self.tt_sha1_help.text = i18n.t('tt_help_btn')
-            self.tt_btn_build_help.text = i18n.t('tt_help_btn')
-            self.tt_btn_set_help.text = i18n.t('tt_help_btn')
-            self.tt_btn_view_help.text = i18n.t('tt_help_btn')
+            self.help_incremental.apply()
+            self.help_sha1.apply()
+            self.help_build.apply()
+            self.help_set.apply()
+            self.help_view.apply()
+            self.help_index_content.apply()
         except Exception:
             pass
-        
-        # Update buttons
+
         self._refresh_build_button_text()
         self.btn_set.config(text=i18n.t('btn_set'))
         self.btn_view.config(text=i18n.t('btn_view'))
+        self.btn_index_content.config(text=i18n.t('btn_index_content'))
         self.btn_exit.config(text=i18n.t('btn_exit'))
-        try:
-            if getattr(self, 'scan_progress_stop_btn', None):
-                self.scan_progress_stop_btn.config(text=i18n.t('btn_stop'))
-            if getattr(self, 'scan_progress_bg_btn', None):
-                self.scan_progress_bg_btn.config(text=i18n.t('btn_background'))
-        except Exception:
-            pass
         try:
             if getattr(self, 'btn_stop', None):
                 self.btn_stop.config(text=i18n.t('btn_stop'))
@@ -457,16 +636,41 @@ class App(ttk.Window):
             pass
         if getattr(self, 'xlsx_warn_label', None):
             self.xlsx_warn_label.config(text=i18n.t('xlsx_disabled_warn'))
-        
-        # Update status
-        self.status.config(text=i18n.t('status_ready'))
-        
-        # Update all open viewers
-        for widget in self.winfo_children():
-            if isinstance(widget, Viewer):
-                widget.update_language()
-        
-        # Show toast notification
+        if not getattr(self, 'scan_running', False):
+            self.status.config(text=i18n.t('status_ready'))
+        self._refresh_scan_progress_language()
+
+    def _notify_ui_change(self, change_kind: str):
+        """Propagate a global UI change to all live child windows and widgets."""
+        for widget in self._iter_ui_targets():
+            if widget is self:
+                continue
+            handler = getattr(widget, 'on_ui_changed', None)
+            if callable(handler):
+                try:
+                    handler(change_kind)
+                    continue
+                except Exception:
+                    pass
+            updater = None
+            if change_kind == 'language':
+                updater = getattr(widget, 'update_language', None)
+            elif change_kind == 'theme':
+                updater = getattr(widget, 'update_theme', None)
+            if callable(updater):
+                try:
+                    updater()
+                except Exception:
+                    pass
+
+    def change_language(self, event=None):
+        """Change application language"""
+        new_lang = self.lang_var.get()
+        i18n.set_language(new_lang)
+
+        self._apply_language_to_self()
+        self._notify_ui_change('language')
+
         toast = ToastNotification(
             title=i18n.t('lang_changed'),
             message=f"{i18n.t('lang_changed_msg')}{new_lang.upper()}",
@@ -478,7 +682,8 @@ class App(ttk.Window):
         """Change application theme"""
         new_theme = self.theme_var.get()
         self.style.theme_use(new_theme)
-        
+        self._notify_ui_change('theme')
+
         toast = ToastNotification(
             title=i18n.t('theme_changed'),
             message=f"{i18n.t('theme_changed_msg')}{new_theme}",
@@ -486,9 +691,19 @@ class App(ttk.Window):
         )
         toast.show_toast()
 
+    def _on_status_frame_configure(self, event=None):
+        try:
+            frame_w = max(1, self.status_frame.winfo_width())
+            btn_w = self.btn_stop.winfo_width() if getattr(self, 'btn_stop', None) else 0
+            available = max(220, frame_w - btn_w - 30)
+            self.status.configure(wraplength=available)
+        except Exception:
+            pass
+
     def set_status(self, text: str):
         """Update main-window status text only."""
         self.status.config(text=text)
+        self._on_status_frame_configure()
         self._tray_tooltip_text = text or ""
         self._update_tray_tooltip()
         self.update_idletasks()
@@ -810,8 +1025,6 @@ class App(ttk.Window):
             try:
                 action = self.scan_close_controller.request(
                     "main_close",
-                    message=i18n.t('exit_scan_running_msg'),
-                    title=i18n.t('exit_scan_running_title'),
                     hide_progress=False,
                 )
             except Exception:
@@ -946,6 +1159,24 @@ class App(ttk.Window):
         y = self.winfo_y() + (self.winfo_height() // 2) - (360 // 2)
         self.scan_progress_dialog.geometry(f"+{x}+{y}")
 
+        def _scan_progress_update_language():
+            try:
+                self.scan_progress_dialog.title(i18n.t('status_scan'))
+            except Exception:
+                pass
+            try:
+                self.scan_progress_title_label.config(text=i18n.t('status_counting_title'))
+            except Exception:
+                pass
+            try:
+                self.scan_progress_bg_btn.config(text=i18n.t('btn_background'))
+                self.scan_progress_stop_btn.config(text=i18n.t('btn_stop'))
+            except Exception:
+                pass
+
+        self.scan_progress_dialog.update_language = _scan_progress_update_language
+        self.scan_progress_dialog.on_ui_changed = lambda kind: _scan_progress_update_language() if kind == 'language' else None
+
         frame = ttk.Frame(self.scan_progress_dialog, padding=15)
         frame.pack(fill="both", expand=True)
 
@@ -1019,6 +1250,7 @@ class App(ttk.Window):
 
     def hide_scan_progress(self):
         """Close scan progress dialog"""
+        prev_state = getattr(self, "_restore_state_after_background", None)
         try:
             if getattr(self, "btn_stop", None):
                 self.btn_stop.config(state="disabled")
@@ -1036,6 +1268,14 @@ class App(ttk.Window):
             pass
         try:
             if getattr(self, "scan_progress_dialog", None) and self.scan_progress_dialog.winfo_exists():
+                try:
+                    self.scan_progress_dialog.grab_release()
+                except Exception:
+                    pass
+                try:
+                    self.scan_progress_dialog.transient(None)
+                except Exception:
+                    pass
                 self.scan_progress_dialog.destroy()
         except Exception:
             pass
@@ -1069,12 +1309,36 @@ class App(ttk.Window):
         try:
             if self.scan_tray:
                 self.scan_tray.hide()
-            if was_backgrounded:
-                self.deiconify()
-                self.lift()
-                self.focus_force()
         except Exception:
             pass
+        if was_backgrounded:
+            def _restore_main():
+                try:
+                    self.deiconify()
+                    if prev_state == "zoomed":
+                        try:
+                            self.state("zoomed")
+                        except Exception:
+                            pass
+                    self.update_idletasks()
+                    self.lift()
+                    try:
+                        self.attributes("-topmost", True)
+                        self.update_idletasks()
+                        self.attributes("-topmost", False)
+                    except Exception:
+                        pass
+                    try:
+                        self.focus_force()
+                    except Exception:
+                        try:
+                            self.focus_set()
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+            _restore_main()
+            self._safe_after(50, _restore_main)
 
 
     def choose_set_source(self) -> str | None:
@@ -1105,13 +1369,15 @@ class App(ttk.Window):
         frame = ttk.Frame(win, padding=15)
         frame.pack(fill="both", expand=True)
 
-        ttk.Label(frame, text=i18n.t('choose_set_source_title'), font=("Segoe UI", 10, "bold")).pack(anchor="w")
-        ttk.Label(
+        title_lbl = ttk.Label(frame, text=i18n.t('choose_set_source_title'), font=("Segoe UI", 10, "bold"))
+        title_lbl.pack(anchor="w")
+        body_lbl = ttk.Label(
             frame,
             text=i18n.t('source_text'),
             justify="left",
             font=("Segoe UI", 9),
-        ).pack(anchor="w", fill="x", pady=(8, 14))
+        )
+        body_lbl.pack(anchor="w", fill="x", pady=(8, 14))
 
         btns = ttk.Frame(frame)
         btns.pack(fill="x", pady=(10, 0))
@@ -1123,9 +1389,26 @@ class App(ttk.Window):
             except Exception:
                 pass
 
-        ttk.Button(btns, text=i18n.t('choose_set_source_paste'), command=lambda: choose('paste'), bootstyle="primary").pack(side="left")
-        ttk.Button(btns, text=i18n.t('choose_set_source_file'), command=lambda: choose('file'), bootstyle="secondary").pack(side="left", padx=8)
-        ttk.Button(btns, text=i18n.t('choose_set_source_cancel'), command=lambda: choose(None), bootstyle="secondary").pack(side="right")
+        paste_btn = ttk.Button(btns, text=i18n.t('choose_set_source_paste'), command=lambda: choose('paste'), bootstyle="primary")
+        paste_btn.pack(side="left")
+        file_btn = ttk.Button(btns, text=i18n.t('choose_set_source_file'), command=lambda: choose('file'), bootstyle="secondary")
+        file_btn.pack(side="left", padx=8)
+        cancel_btn = ttk.Button(btns, text=i18n.t('choose_set_source_cancel'), command=lambda: choose(None), bootstyle="secondary")
+        cancel_btn.pack(side="right")
+
+        def _update_language():
+            try:
+                win.title(i18n.t('choose_set_source_title'))
+                title_lbl.config(text=i18n.t('choose_set_source_title'))
+                body_lbl.config(text=i18n.t('source_text'))
+                paste_btn.config(text=i18n.t('choose_set_source_paste'))
+                file_btn.config(text=i18n.t('choose_set_source_file'))
+                cancel_btn.config(text=i18n.t('choose_set_source_cancel'))
+            except Exception:
+                pass
+
+        win.update_language = _update_language
+        win.on_ui_changed = lambda kind: _update_language() if kind == 'language' else None
 
         win.wait_window()
         return res['v']
@@ -1171,7 +1454,7 @@ class App(ttk.Window):
             try:
                 # Default name: suggested_name or "report.txt"
                 default = suggested_name or "report.txt"
-                out = filedialog.asksaveasfilename(
+                out = asksaveasfilename_custom(self, 
                     title=i18n.t('save_report_title'),
                     defaultextension=".txt",
                     initialfile=default,
@@ -1186,10 +1469,24 @@ class App(ttk.Window):
             except Exception as e:
                 Messagebox.show_error(i18n.t('report_save_failed_generic'), i18n.t('error'), parent=win)
 
-        ttk.Button(btns, text=i18n.t('save_report_btn'), command=save_report, bootstyle="primary").pack(side="left")
+        save_btn = ttk.Button(btns, text=i18n.t('save_report_btn'), command=save_report, bootstyle="primary")
+        save_btn.pack(side="left")
 
-        ttk.Button(btns, text=i18n.t('copy'), command=copy_all, bootstyle="secondary").pack(side="left")
-        ttk.Button(btns, text=i18n.t('close'), command=win.destroy, bootstyle="secondary").pack(side="right")
+        copy_btn = ttk.Button(btns, text=i18n.t('copy'), command=copy_all, bootstyle="secondary")
+        copy_btn.pack(side="left")
+        close_btn = ttk.Button(btns, text=i18n.t('close'), command=win.destroy, bootstyle="secondary")
+        close_btn.pack(side="right")
+
+        def _update_language():
+            try:
+                save_btn.config(text=i18n.t('save_report_btn'))
+                copy_btn.config(text=i18n.t('copy'))
+                close_btn.config(text=i18n.t('close'))
+            except Exception:
+                pass
+
+        win.update_language = _update_language
+        win.on_ui_changed = lambda kind: _update_language() if kind == 'language' else None
 
         try:
             win.update_idletasks()
@@ -1287,18 +1584,7 @@ class App(ttk.Window):
 
     def build_db(self):
         """Build database from one or more selected folders (runs in background thread so spinner animates)"""
-        folders = []
-        seen = set()
-        while True:
-            folder = filedialog.askdirectory(title=i18n.t('choose_scan_folders_title'))
-            if not folder:
-                break
-            norm = os.path.normcase(os.path.abspath(folder))
-            if norm not in seen:
-                seen.add(norm)
-                folders.append(os.path.abspath(folder))
-            if not Messagebox.yesno(i18n.t('add_more_folders_text'), i18n.t('add_more_folders_title'), parent=self):
-                break
+        folders = choose_multiple_folders(self)
 
         if not folders:
             Messagebox.show_warning(i18n.t('no_scan_folders_selected'), i18n.t('warning'), parent=self)
@@ -1309,7 +1595,7 @@ class App(ttk.Window):
 
         if run_incremental:
             while True:
-                chosen = filedialog.askopenfilename(
+                chosen = askopenfilename_custom(self, 
                     title=i18n.t('choose_db_open_title'),
                     filetypes=[(i18n.t('sqlite_db_filetype'), "*.db"), (i18n.t('filetype_all'), "*.*")],
                 )
@@ -1321,7 +1607,7 @@ class App(ttk.Window):
                     )
                     if not create_new:
                         return
-                    chosen = filedialog.asksaveasfilename(
+                    chosen = asksaveasfilename_custom(self, 
                         title=i18n.t('choose_db_save_title'),
                         defaultextension=".db",
                         filetypes=[(i18n.t('sqlite_db_filetype'), "*.db"), (i18n.t('filetype_all'), "*.*")],
@@ -1345,7 +1631,7 @@ class App(ttk.Window):
                 if retry_existing:
                     continue
 
-                chosen = filedialog.asksaveasfilename(
+                chosen = asksaveasfilename_custom(self, 
                     title=i18n.t('choose_db_save_title'),
                     defaultextension=".db",
                     filetypes=[(i18n.t('sqlite_db_filetype'), "*.db"), (i18n.t('filetype_all'), "*.*")],
@@ -1356,7 +1642,7 @@ class App(ttk.Window):
                 db_path = chosen
                 break
         else:
-            db_path = filedialog.asksaveasfilename(
+            db_path = asksaveasfilename_custom(self, 
                 title=i18n.t('choose_db_save_title'),
                 defaultextension=".db",
                 filetypes=[(i18n.t('sqlite_db_filetype'), "*.db"), (i18n.t('filetype_all'), "*.*")],
@@ -1460,11 +1746,13 @@ class App(ttk.Window):
                 self._tray_progress_total = 0
                 if stats.get("stopped"):
                     self.set_status(i18n.t('status_scan_stopped'))
+                    self._restore_main_before_dialog()
                     Messagebox.show_info(
                         i18n.t('scan_stopped_msg').format(total=self._fmt_num(stats.get('files_total', 0)), errors=self._fmt_num(stats.get('errors', 0))),
                         i18n.t('scan_stopped_title'),
                         parent=self,
                     )
+                    self.set_status(i18n.t('status_ready'))
                 else:
                     self._update_scan_progress_visuals(stats.get('files_total', 0), stats.get('files_planned', 0))
                     self.set_status(
@@ -1493,6 +1781,7 @@ class App(ttk.Window):
                 self._tray_progress_processed = 0
                 self._tray_progress_total = 0
                 self.set_status(i18n.t('error'))
+                self._restore_main_before_dialog()
                 Messagebox.show_error(i18n.t('scan_failed_generic'), i18n.t('error'), parent=self)
             finally:
                 self.hide_scan_progress()
@@ -1542,7 +1831,7 @@ class App(ttk.Window):
 
     def make_set(self):
         """Create or update a set"""
-        db_path = filedialog.askopenfilename(
+        db_path = askopenfilename_custom(self, 
             title=i18n.t('choose_db_open_title'),
             filetypes=[(i18n.t('sqlite_db_filetype'), "*.db"), (i18n.t('filetype_all'), "*.*")]
         )
@@ -1578,7 +1867,7 @@ class App(ttk.Window):
                         (i18n.t('excel_files_filetype'), "*.xlsx *.xlsm *.xltx *.xltm"),
                         (i18n.t('filetype_all'), "*.*"),
                     ]
-                in_path = filedialog.askopenfilename(title=i18n.t('choose_set_source_file'), filetypes=ft)
+                in_path = askopenfilename_custom(self, title=i18n.t('choose_set_source_file'), filetypes=ft)
                 if not in_path:
                     return
                 ext = os.path.splitext(in_path)[1].lower()
@@ -1589,7 +1878,7 @@ class App(ttk.Window):
                 elif ext in (".xlsx", ".xlsm", ".xltx", ".xltm"):
                     paths = read_paths_from_xlsx(in_path)
                 else:
-                    raise ValueError("Only .txt and .xlsx/.xlsm/.xltx/.xltm supported")
+                    raise ValueError(i18n.t('unsupported_set_source_filetype'))
         except Exception as e:
             Messagebox.show_error(i18n.t('err_read_paths_generic'), i18n.t('error'), parent=self)
             return
@@ -1627,16 +1916,209 @@ class App(ttk.Window):
             self.set_status(i18n.t('error'))
             Messagebox.show_error(i18n.t('set_sync_failed_generic'), i18n.t('error'), parent=self)
 
-    def open_viewer(self):
-        """Open database viewer"""
-        db_path = filedialog.askopenfilename(
-            title=i18n.t('viewer_title'),
+    def index_document_content(self):
+        db_path = askopenfilename_custom(self, 
+            title=i18n.t('choose_db_open_title'),
             filetypes=[(i18n.t('sqlite_db_filetype'), "*.db"), (i18n.t('filetype_all'), "*.*")]
         )
         if not db_path:
             return
+
         try:
-            viewer = Viewer(self, db_path)
-            viewer.update_language()
-        except Exception as e:
+            missing = validate_db_path(db_path)
+        except Exception:
             Messagebox.show_error(i18n.t('err_open_db_generic'), i18n.t('error'), parent=self)
+            return
+
+        if missing:
+            msg = i18n.t('old_db_message').format(tables=', '.join(missing))
+            Messagebox.show_error(msg, i18n.t('old_db_title'), parent=self)
+            return
+
+        if self.scan_running:
+            return
+
+        self.stop_flag["stop"] = False
+        self.scan_running = True
+        self.scan_backgrounded = False
+        self.scan_progress_user_closed = False
+        self.show_scan_progress()
+        try:
+            if getattr(self, 'scan_progress_dialog', None) and self.scan_progress_dialog.winfo_exists():
+                self.scan_progress_dialog.title(i18n.t('index_docs_title'))
+        except Exception:
+            pass
+        try:
+            if getattr(self, 'scan_progress_title_label', None):
+                self.scan_progress_title_label.config(text=i18n.t('index_docs_title'))
+        except Exception:
+            pass
+        try:
+            if getattr(self, 'scan_progress_bg_btn', None):
+                self.scan_progress_bg_btn.config(text=i18n.t('btn_background'))
+        except Exception:
+            pass
+        try:
+            if getattr(self, 'scan_progress_label', None):
+                self.scan_progress_label.config(text=db_path)
+        except Exception:
+            pass
+        try:
+            if getattr(self, 'scan_progress_bar', None):
+                self.scan_progress_bar.configure(mode='determinate', maximum=100.0, value=0.0)
+        except Exception:
+            pass
+        try:
+            if getattr(self, 'scan_progress_pct_label', None):
+                self.scan_progress_pct_label.config(text='')
+        except Exception:
+            pass
+        self._tray_progress_phase = 'scan'
+        self._tray_progress_processed = 0
+        self._tray_progress_total = 0
+        self.set_status(f"{i18n.t('index_docs_title')}…")
+        self._update_tray_tooltip()
+        self._set_scan_dialog_status(db_path, log=False)
+
+        def _status_cb(info):
+            file = info.get('file') or ''
+            processed = int(info.get('processed', 0) or 0)
+            total = int(info.get('total', 0) or 0)
+            msg = f"{processed}/{total}\n{os.path.basename(file)}" if file else f"{processed}/{total}"
+            status_text = f"{i18n.t('index_docs_title')}: {processed}/{total}" if total else f"{i18n.t('index_docs_title')}…"
+            def _update_ui():
+                try:
+                    self.set_status(status_text)
+                except Exception:
+                    pass
+                try:
+                    if getattr(self, 'scan_progress_label', None):
+                        self.scan_progress_label.config(text=msg)
+                except Exception:
+                    pass
+                try:
+                    self._set_scan_dialog_status(msg, log=True)
+                except Exception:
+                    pass
+                try:
+                    self._tray_progress_phase = 'scan'
+                    self._tray_progress_processed = processed
+                    self._tray_progress_total = total
+                    self._update_tray_tooltip()
+                except Exception:
+                    pass
+                try:
+                    if getattr(self, 'scan_progress_bar', None):
+                        pct = (processed / total * 100.0) if total else 0.0
+                        self.scan_progress_bar.configure(mode='determinate', maximum=100.0, value=pct)
+                        self.scan_progress_pct_label.config(text=(f"{pct:.1f}%" if total else ''))
+                except Exception:
+                    pass
+            self._safe_after(0, _update_ui)
+
+        def _worker():
+            try:
+                stats = index_document_contents(db_path, status_cb=_status_cb, stop_flag=self.stop_flag)
+                def _done():
+                    was_backgrounded = self.scan_backgrounded
+                    self.scan_running = False
+                    self.hide_scan_progress()
+                    if stats.get('stopped'):
+                        msg = i18n.t('status_scan_stopped')
+                        self.set_status(msg)
+                        if was_backgrounded:
+                            self._restore_main_before_dialog()
+                            try:
+                                self._append_scan_log(msg)
+                            except Exception:
+                                pass
+                        return
+                    if int(stats.get('queued', 0) or 0) == 0:
+                        msg = i18n.t('index_docs_nothing_to_do')
+                    else:
+                        msg = i18n.t('index_docs_summary').format(processed=stats.get('processed',0), ok=stats.get('ok',0), errors=stats.get('errors',0))
+                    self.set_status(msg)
+                    if was_backgrounded:
+                        self._restore_main_before_dialog()
+                        try:
+                            self._append_scan_log(msg)
+                        except Exception:
+                            pass
+                    else:
+                        Messagebox.show_info(msg, i18n.t('index_docs_title'), parent=self)
+                self._safe_after(0, _done)
+            except Exception as e:
+                def _err(err=e):
+                    was_backgrounded = self.scan_backgrounded
+                    self.scan_running = False
+                    self.hide_scan_progress()
+                    if was_backgrounded:
+                        self._restore_main_before_dialog()
+                        self.set_status(str(err))
+                        try:
+                            self._append_scan_log(str(err))
+                        except Exception:
+                            pass
+                        Messagebox.show_error(str(err), i18n.t('error'))
+                    else:
+                        Messagebox.show_error(str(err), i18n.t('error'), parent=self)
+                self._safe_after(0, _err)
+        self.scan_thread = threading.Thread(target=_worker, daemon=True)
+        self.scan_thread.start()
+
+    def _choose_viewer_db_path(self):
+        """Ask the user for a database path for the viewer.
+
+        This stays intentionally small: choose a file or return nothing.
+        No validation and no viewer initialization should happen here.
+        """
+        return askopenfilename_custom(
+            self,
+            title=i18n.t('choose_db_open_title'),
+            filetypes=[(i18n.t('sqlite_db_filetype'), "*.db"), (i18n.t('filetype_all'), "*.*")],
+        )
+
+    def _validate_viewer_db_path(self, db_path: str) -> bool:
+        """Validate database structure before opening the viewer.
+
+        Returns True only when the database is suitable for the viewer.
+        All user-facing database errors are handled here so the caller can
+        remain a straight-through "open viewer" flow.
+        """
+        try:
+            missing = validate_db_path(db_path)
+        except Exception:
+            Messagebox.show_error(i18n.t('err_open_db_generic'), i18n.t('error'), parent=self)
+            return False
+
+        if missing:
+            msg = i18n.t('old_db_message').format(tables=', '.join(missing))
+            Messagebox.show_error(msg, i18n.t('old_db_title'), parent=self)
+            return False
+
+        return True
+
+    def _create_viewer_window(self, db_path: str):
+        """Create and initialize the viewer window.
+
+        Viewer creation is separated from database validation so future
+        viewer-related features do not complicate the simple "open DB"
+        scenario and do not get reported as database-open failures.
+        """
+        viewer = Viewer(self, db_path)
+        viewer.update_language()
+        return viewer
+
+    def open_viewer(self):
+        """Open database viewer using a simple, linear flow."""
+        db_path = self._choose_viewer_db_path()
+        if not db_path:
+            return
+
+        if not self._validate_viewer_db_path(db_path):
+            return
+
+        try:
+            self._create_viewer_window(db_path)
+        except Exception as e:
+            Messagebox.show_error(str(e), i18n.t('error'), parent=self)

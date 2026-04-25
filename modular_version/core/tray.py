@@ -8,6 +8,7 @@ import textwrap
 from pathlib import Path
 
 from core.ui_common import get_app_icon_ico_path
+from core.proc import popen_quiet
 
 
 class TrayIcon:
@@ -131,9 +132,8 @@ class TrayIcon:
             return
         self._stop_file.unlink(missing_ok=True)
         self._restore_file.unlink(missing_ok=True)
-        flags = getattr(subprocess, 'CREATE_NO_WINDOW', 0) if os.name == 'nt' else 0
         cmd = [
-            'powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass',
+            'powershell.exe', '-NoProfile', '-ExecutionPolicy', 'Bypass',
             '-File', str(self._script_file),
             '-TipFile', str(self._tip_file),
             '-RestoreFile', str(self._restore_file),
@@ -141,12 +141,11 @@ class TrayIcon:
             '-ParentPid', str(os.getpid()),
             '-IconPath', str(self._icon_path),
         ]
-        self._proc = subprocess.Popen(
+        self._proc = popen_quiet(
             cmd,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             stdin=subprocess.DEVNULL,
-            creationflags=flags,
         )
 
     def _write_tip(self, tooltip: str):
